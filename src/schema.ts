@@ -1,60 +1,135 @@
 import { createSchema } from "graphql-yoga";
-
-type Link = {
-  id: string;
-  url: string;
-  description: string;
-};
+import type { Link, Comment } from "@prisma/client";
+import type { GraphQLContext } from "./context";
+import { GraphQLError } from "graphql";
+import { Prisma } from "@prisma/client";
 
 const typeDefinitions = `
   type Query {
     info: String!
     feed: [Link!]!
+    link(id: ID!): Link
+    comment(id: ID!): Comment
   }
   
   type Mutation {
     postLink(url: String!, description: String!): Link!
+    postCommentOnLink(linkId: ID!, body: String!): Comment!
   }
 
   type Link {
     id: ID!
     description: String!
     url: String!
+    comments: [Comment!]!
+  }
+
+  type Comment {
+    id: ID!
+    createdAt: String!
+    body: String!
+    link: Link!
   }
 `;
 
-const links: Link[] = [
-  {
-    id: "link-0",
-    url: "https://graphql-yoga.com",
-    description: "The easiest way of setting up a GraphQL server",
-  },
-];
+const parseIntSafe = (value: string) => {
+  if (/^\d+$/.test(value)) {
+    return parseInt(value);
+  }
+
+  return null;
+};
 
 const resolvers = {
   Query: {
     info: () => "This is the API of a Hackernews Clone",
-    feed: () => links,
+    feed: (parent: unknown, args: {}, context: GraphQLContext) => {
+      return context.prisma.link.findMany();
+    },
+    comment(parent: unknown, args: { id: string }, context: GraphQLContext) {
+      return context.prisma.comment.findUnique({
+        where: { id: parseInt(args.id) },
+      });
+    },
+    link(parent: unknown, args: { id: string }, context: GraphQLContext) {
+      return context.prisma.link.findUnique({
+        where: { id: parseInt(args.id) },
+      });
+    },
   },
   Mutation: {
-    postLink: (parent: unknown, args: { url: string; description: string }) => {
-      const idCount = links.length;
+    async postLink(
+      parent: unknown,
+      args: { url: string; description: string },
+      context: GraphQLContext
+    ) {
+      const newLink = await context.prisma.link.create({
+        data: {
+          url: args.url,
+          description: args.description,
+        },
+      });
 
-      const link = {
-        id: `link-${idCount}`,
-        description: args.description,
-        url: args.url,
-      };
+      return newLink;
+    },
+    async postCommentOnLink(
+      parent: unknown,
+      args: { linkId: string; body: string },
+      context: GraphQLContext
+    ) {
+      const linkId = parseIntSafe(args.linkId);
+      if (linkId === null) {
+        return Promise.reject(
+          new GraphQLError(
+            `Cannot post comment on non-existing link with id '${args.linkId}'.`
+          )
+        );
+      }
+      const newComment = await context.prisma.comment
+        .create({
+          data: {
+            linkId,
+            body: args.body,
+          },
+        })
+        .catch((err: unknown) => {
+          if (
+            err instanceof Prisma.PrismaClientKnownRequestError &&
+            err.code === "P2003"
+          ) {
+            return Promise.reject(
+              new GraphQLError(
+                `Cannot post comment on non-existing link with id ${args.linkId}`
+              )
+            );
+          }
+        });
 
-      links.push(link);
-
-      return link;
+      return newComment;
+    },
+  },
+  Comment: {
+    id: (parent: Comment) => parent.id,
+    createdAt: (parent: Comment) => parent.createdAt.toISOString(),
+    body: (parent: Comment) => parent.body,
+    link: (parent: Comment, args: {}, context: GraphQLContext) => {
+      return context.prisma.link.findUnique({
+        where: { id: parent.linkId },
+      });
     },
   },
   Link: {
     id: (parent: Link) => parent.id,
     description: (parent: Link) => parent.description,
     url: (parent: Link) => parent.url,
+    comments: (parent: Link, args: {}, context: GraphQLContext) => {
+      return context.prisma.comment.findMany({
+        orderBy: { createdAt: "desc" },
+        where: {
+          linkId: parent.id,
+        },
+      });
+    },
   },
 };
 
